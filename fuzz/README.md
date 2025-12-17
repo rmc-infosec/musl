@@ -34,6 +34,10 @@ Then run a fuzzer, e.g.:
 
 See `fuzz/COVERAGE.md` for a local coverage workflow and an example snapshot.
 
+## Findings
+
+See `fuzz/FINDINGS.md` for issues found while running the fuzzers locally.
+
 ## Seed corpora
 
 The DNS-related fuzzers (`musl_dn_expand_fuzzer`, `musl_dns_parse_fuzzer`,
