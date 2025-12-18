@@ -40,6 +40,14 @@
 
 #include <assert.h>
 
+/*
+ * Regex compilation can be forced into extreme time/memory usage via nested
+ * repetitions (e.g. (a{255}){255}). Put a hard cap on the expanded position
+ * space and transition table size to prevent pathological blowups.
+ */
+#define TRE_COMP_POS_MAX 100000
+#define TRE_COMP_TRANS_MAX_BYTES (256u * 1024u * 1024u)
+
 /***********************************************************************
  from tre-compile.h
 ***********************************************************************/
@@ -1935,6 +1943,8 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
 					  &max_pos);
 		    if (status != REG_OK)
 		      return status;
+		    if (max_pos > TRE_COMP_POS_MAX)
+		      return REG_ESPACE;
 		    if (seq1 != NULL)
 		      seq1 = tre_ast_new_catenation(mem, seq1, copy);
 		    else
@@ -1951,6 +1961,8 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
 					  &pos_add, NULL, &seq2, &max_pos);
 		    if (status != REG_OK)
 		      return status;
+		    if (max_pos > TRE_COMP_POS_MAX)
+		      return REG_ESPACE;
 		    seq2 = tre_ast_new_iter(mem, seq2, 0, -1, 0);
 		    if (seq2 == NULL)
 		      return REG_ESPACE;
@@ -1965,6 +1977,8 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
 					      &pos_add, NULL, &copy, &max_pos);
 			if (status != REG_OK)
 			  return status;
+			if (max_pos > TRE_COMP_POS_MAX)
+			  return REG_ESPACE;
 			if (seq2 != NULL)
 			  seq2 = tre_ast_new_catenation(mem, copy, seq2);
 			else
@@ -2012,6 +2026,8 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
      allocated for the transition table. */
   if (max_pos > *position)
     *position = max_pos;
+  if (*position > TRE_COMP_POS_MAX)
+    return REG_ESPACE;
 
   return status;
 }
@@ -2766,16 +2782,20 @@ regcomp(regex_t *restrict preg, const char *restrict regex, int cflags)
 	  tnfa->tag_directions = tag_directions;
 	  memset(tag_directions, -1,
 		 sizeof(*tag_directions) * (tnfa->num_tags + 1));
-	}
-      tnfa->minimal_tags = xcalloc((unsigned)tnfa->num_tags * 2 + 1,
-				   sizeof(*tnfa->minimal_tags));
-      if (tnfa->minimal_tags == NULL)
-	ERROR_EXIT(REG_ESPACE);
+		}
+	      if (tnfa->num_tags < 0 || (unsigned)tnfa->num_tags > (UINT_MAX - 1) / 2)
+		ERROR_EXIT(REG_ESPACE);
+	      tnfa->minimal_tags = xcalloc((unsigned)tnfa->num_tags * 2 + 1,
+					   sizeof(*tnfa->minimal_tags));
+	      if (tnfa->minimal_tags == NULL)
+		ERROR_EXIT(REG_ESPACE);
 
-      submatch_data = xcalloc((unsigned)parse_ctx.submatch_id,
-			      sizeof(*submatch_data));
-      if (submatch_data == NULL)
-	ERROR_EXIT(REG_ESPACE);
+	      if (parse_ctx.submatch_id < 0)
+		ERROR_EXIT(REG_ESPACE);
+	      submatch_data = xcalloc((unsigned)parse_ctx.submatch_id,
+				      sizeof(*submatch_data));
+	      if (submatch_data == NULL)
+		ERROR_EXIT(REG_ESPACE);
       tnfa->submatch_data = submatch_data;
 
       errcode = tre_add_tags(mem, stack, tree, tnfa);
@@ -2789,6 +2809,8 @@ regcomp(regex_t *restrict preg, const char *restrict regex, int cflags)
 			   tag_directions);
   if (errcode != REG_OK)
     ERROR_EXIT(errcode);
+  if (parse_ctx.position > TRE_COMP_POS_MAX)
+    ERROR_EXIT(REG_ESPACE);
 
   /* Add a dummy node for the final state.
      XXX - For certain patterns this dummy node can be optimized away,
@@ -2803,32 +2825,45 @@ regcomp(regex_t *restrict preg, const char *restrict regex, int cflags)
   if (tree == NULL)
     ERROR_EXIT(REG_ESPACE);
 
-  errcode = tre_compute_nfl(mem, stack, tree);
-  if (errcode != REG_OK)
-    ERROR_EXIT(errcode);
+	  errcode = tre_compute_nfl(mem, stack, tree);
+	  if (errcode != REG_OK)
+	    ERROR_EXIT(errcode);
 
-  counts = xmalloc(sizeof(int) * parse_ctx.position);
-  if (counts == NULL)
-    ERROR_EXIT(REG_ESPACE);
+	  if (parse_ctx.position < 0
+	      || (size_t)parse_ctx.position > SIZE_MAX / sizeof(int))
+	    ERROR_EXIT(REG_ESPACE);
+	  counts = xmalloc(sizeof(int) * parse_ctx.position);
+	  if (counts == NULL)
+	    ERROR_EXIT(REG_ESPACE);
 
-  offs = xmalloc(sizeof(int) * parse_ctx.position);
-  if (offs == NULL)
-    ERROR_EXIT(REG_ESPACE);
+	  offs = xmalloc(sizeof(int) * parse_ctx.position);
+	  if (offs == NULL)
+	    ERROR_EXIT(REG_ESPACE);
 
   for (i = 0; i < parse_ctx.position; i++)
     counts[i] = 0;
-  tre_ast_to_tnfa(tree, NULL, counts, NULL);
+	  tre_ast_to_tnfa(tree, NULL, counts, NULL);
 
-  add = 0;
-  for (i = 0; i < parse_ctx.position; i++)
-    {
-      offs[i] = add;
-      add += counts[i] + 1;
-      counts[i] = 0;
-    }
-  transitions = xcalloc((unsigned)add + 1, sizeof(*transitions));
-  if (transitions == NULL)
-    ERROR_EXIT(REG_ESPACE);
+	  add = 0;
+	  for (i = 0; i < parse_ctx.position; i++)
+	    {
+	      if (counts[i] < 0 || add < 0 || add > INT_MAX - counts[i] - 1)
+		ERROR_EXIT(REG_ESPACE);
+	      offs[i] = add;
+	      add += counts[i] + 1;
+	      counts[i] = 0;
+	    }
+	  if (add < 0)
+	    ERROR_EXIT(REG_ESPACE);
+	  if ((unsigned)add > UINT_MAX - 1)
+	    ERROR_EXIT(REG_ESPACE);
+	  if ((size_t)((unsigned)add + 1) > SIZE_MAX / sizeof(*transitions))
+	    ERROR_EXIT(REG_ESPACE);
+	  if ((size_t)((unsigned)add + 1) * sizeof(*transitions) > TRE_COMP_TRANS_MAX_BYTES)
+	    ERROR_EXIT(REG_ESPACE);
+	  transitions = xcalloc((unsigned)add + 1, sizeof(*transitions));
+	  if (transitions == NULL)
+	    ERROR_EXIT(REG_ESPACE);
   tnfa->transitions = transitions;
   tnfa->num_transitions = add;
 
