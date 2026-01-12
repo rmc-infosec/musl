@@ -633,10 +633,21 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
   tre_tnfa_transition_t *trans_i;
   regmatch_t *pmatch = NULL;
   int ret;
+  size_t steps = 0;
+  size_t max_steps;
+  size_t str_len = strlen((const char *)string);
 
 #ifdef TRE_MBSTATE
   memset(&mbstate, '\0', sizeof(mbstate));
 #endif /* TRE_MBSTATE */
+
+  /*
+   * Guard against pathological backtracking in patterns with backrefs.
+   * Treat excessive work as resource exhaustion.
+   */
+  max_steps = 1000000u + str_len * 1000u;
+  if (tnfa->num_states > 0)
+    max_steps += (size_t)tnfa->num_states * 1000u;
 
   if (!mem)
     return REG_ESPACE;
@@ -738,6 +749,11 @@ tre_tnfa_run_backtrack(const tre_tnfa_t *tnfa, const void *string,
 
   while (1)
     {
+      if (++steps > max_steps)
+	{
+	  ret = REG_ESPACE;
+	  goto error_exit;
+	}
       tre_tnfa_transition_t *next_state;
       int empty_br_match;
 
